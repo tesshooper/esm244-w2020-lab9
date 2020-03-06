@@ -1,0 +1,272 @@
+---
+title: "Hooper_ESM244_Lab9"
+author: "Tess Hooper"
+date: "3/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+library(janitor)
+library(gt)
+library(boot)
+library(patchwork)
+library(broom)
+library(nlstools)
+
+
+# Note: get gt package from GitHub
+# library(devtools)
+# remotes::install_github("rstudio/gt")
+
+```
+
+### Fun tables with `gt`
+
+LifeCycleSavings (see ?LifeCycleSavings)
+```{r}
+
+disp_income <- LifeCycleSavings %>% 
+  rownames_to_column() %>% 
+  arrange(dpi)  %>% # arrange does actually change the structure of our data
+  head(5) %>% # Get top 5 countries with lowest dpi
+  mutate(ddpi = ddpi / 100,
+         pop15 = pop15 / 100,
+         pop75 = pop75 / 100) #Converting percentage values into decimal values
+
+
+```
+
+
+Now let's make a nicer table with the `gt` package:
+```{r}
+
+disp_income %>% 
+  gt() %>% 
+  tab_header(
+    title = "Life Cycle Savings", # Add a title
+    subtitle = "5 countries with the lowest per capita disposable income" # Add a subtitle
+  ) %>% 
+  fmt_currency(
+    columns = vars(dpi), # Change dpi to dollar format
+    decimals = 2 # Keep two decimal places
+  ) %>% # fmt = format -- many options in the fmt_() 
+  fmt_percent(
+    columns = vars(pop15, 
+                   pop75, 
+                   ddpi),
+    decimals = 1
+  ) %>% 
+  tab_options(
+    table.width = pct(80) # I want my table to be 80% of the page width. And it will also djust
+  ) %>% 
+  tab_footnote(
+    footnote = "Data averaged from 1970 - 1980", # Needs location
+    location = cells_title() # Footnote will be placed next to the title of the table, and matching footnote text will be at the botto of the table.
+  ) %>% 
+  data_color(
+    columns = vars(dpi), # I would like the colors in the dpi column to depend on that variable value (so some gradient of colors)
+    colors = scales::col_numeric( # Numeric scale
+      palette = c("orange", "red", "purple") ,
+      domain = c(88, 190) # Need to specify the range of values in the column that you want the colors to apply to
+    )
+  ) %>% 
+  cols_label(
+    sr = "Savings ratio"
+  )
+
+
+```
+
+
+
+### Bootsrap the confidence interval for salinity 
+
+```{r}
+
+# Use data() to see which built in data packages exist
+
+hist(salinity$sal)
+
+ggplot(data = salinity, aes(sample = sal)) +
+  geom_qq()
+
+# I believe based on a single sample of n = 28 that a t-distribution describes the sampling distribution!
+
+t.test(salinity$sal) # Get 95% CI for t-distribution
+
+
+# But I really want to compare this by using bootstrapping to find a sampling distribution based on my data, instead of based entirely on assumptions.
+
+```
+ALWAYS ask questions: 
+
+- Do the data look normally distributed? 
+- Do we have a large enough n to depend on Central Limit Theorem? 
+- What assumptions do we make if we find the CI based on a single sample using the t-distribution here? 
+
+
+Create a function to calculate the mean of different bootstrap samples:
+```{r}
+# First, create a function that will calculate the median of each bootstrapped sample
+mean_fun <- function(x,i) {mean(x[i])}
+
+# Then, get just the vector of salinity (salinity$sal)
+sal_nc <- salinity$sal
+
+# For bootstrapping - we're going to treat this one saple as a psuedo population. 
+
+# Let's bootstrap this 
+set.seed(5002)
+salboot_100 <- boot(data = sal_nc,
+                    statistic = mean_fun,
+                    R = 100) # I want you to bootstrap my data and create 100 samples
+
+
+salboot_10k <- boot(data = sal_nc,
+                    statistic = mean_fun,
+                    R = 10000) # I want you to bootstrap my data and create 10K samples
+
+# Check out the output from the bootstrap:
+
+
+salboot_100
+# Original: original sample mean value
+# bias 
+# std. error = based on standard distribution itself
+
+salboot_100$t # The individual means for each bootstrap. These will be different for everybody because they are based off of random sampling. If we wanted everyone to get the same samples we use set.seed(5002) - or some other number
+
+salboot_10k
+
+salboot_100_df <- data.frame(bs_mean = salboot_100$t)
+salboot_10k_df <- data.frame(bs_mean = salboot_10k$t)
+
+
+# Now let's plot the bootstrapped sampling distrubtion:
+p1 <- ggplot(data = salinity, aes(x = sal)) +
+  geom_histogram()
+
+
+p2 <- ggplot(data = salboot_100_df, aes(x = bs_mean)) +
+  geom_histogram()
+p2
+
+p3 <- ggplot(data = salboot_10k_df, aes(x = bs_mean)) +
+  geom_histogram()
+p3
+
+# Using `patchwork`:
+
+p1 + p2 + p3 # THIS IS DIFFERENT THAN FACET WRAP. Facet Wrap splits up graphs based on different variables. 
+
+p1 + p2 / p3 # `patchwork` understands PEMDAS
+```
+
+
+So now we have a sampling distribution based on means calculated from a large number of bootstrap samples, and we can use *this* sampling distribution (instead of one based on assumptions for our single sample) to find the confidence interval. 
+
+```{r}
+boot.ci(salboot_10k, conf = 0.95)
+```
+
+
+### Example: nonlinear least squares
+```{r}
+
+df <- read_csv(here("data", "log_growth.csv"))
+
+ggplot(data = df, aes(x = time, y = pop)) +
+  geom_point()
+
+# Log transformed slope 
+ggplot(data = df, aes(x = time, y = log(pop))) +
+  geom_point()
+# Looks to me that exponential phase goes up to hour 14, and then after that exponential phase isn't dominating anymore
+# Only going to filter for times that are less than 15, then log transform them
+
+```
+
+
+```{r}
+
+# Filter out to only include times up to 14 times to get just exponential phase
+df_exp <- df %>% 
+  filter(time < 15) %>% 
+  mutate(ln_pop = log(pop)) # Add a column that is the natural log of pop
+
+# Model linear to get *k* estimate:
+lm_k <- lm(ln_pop ~ time, data = df_exp)
+lm_k
+
+# Estimates: 
+# growth rate = 0.17
+# K = 189
+# A = 18
+
+## We have to give this function initial estimates - what does the model need to do o get to an acceptable convergence? 
+
+```
+
+Now, NLS:
+```{r}
+
+# NLS is in base stats package
+# NLS works iteratively so we have to give it starting estimates
+
+df_nls <- nls(pop ~ K / (1 + A*exp(-r*time)),
+              data = df, 
+              start = list(K = 180,
+                           A = 17,
+                           r = 0.17),
+              trace = TRUE
+              )
+
+# Note: you can add argument `trace = TRUE` to see the different estimates at each iteration (and the left-most column reported tells you SSE)
+
+summary(df_nls)
+
+# Use broom:: functions to get model outputs in tidier format: 
+model_out <- broom::tidy(df_nls)
+
+# Want to just get one of these? 
+A_est <- tidy(df_nls)$estimate[1]
+```
+
+Our model with estimated parameters is:
+$$P(t) = \frac{188.7}{1+138.86e^{-0.35t}}$$
+
+### Visualize model
+```{r}
+t_seq <- seq(from = 0, to = 35, length = 200)
+
+# Make predictions for the population at all of those times (t)
+p_predict <- predict(df_nls, newdata = t_seq)
+
+# Bind predictions to original data frame:
+df_complete <- data.frame(df, p_predict)
+
+# Plot them all together:
+ggplot(data = df_complete, aes(x = time, y = pop)) +
+  geom_point() +
+  geom_line(aes(x = time, y = p_predict)) +
+  theme_minimal()
+
+```
+
+
+### Find confidence intervals for parameter estimates
+
+See `?confint2` and `?confint.nls`
+```{r}
+df_ci <- confint2(df_nls)
+df_ci
+
+
+
+# If I know the structure of the relationshipa nd not hte parameters, I'll give you the structure and you estimate those constants for me. This is what solver does in Excel. Estimate parameters based on existing data.
+
+```
